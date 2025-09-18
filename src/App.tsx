@@ -12,6 +12,7 @@ const LS_LAST_PLACED_AT = "pp_lastPlacedAt";
 const LS_DEVICE_ID = "pp_deviceId";
 
 
+
 // --- Username validation helpers ---
 const bannedWords = [
   // keep this short at first; expand over time
@@ -130,6 +131,7 @@ function UsernameModal({
 
 
 function App() {
+  
   const { push } = useToast();
 
   const resetUsername = () => {
@@ -166,11 +168,20 @@ const resetDeviceId = () => {
   const totalCells = GRID_WIDTH * GRID_HEIGHT;
   const [nonWhite, setNonWhite] = useState(0);      // revealed pixels on canvas
   const [myPlaced, setMyPlaced] = useState(0);      // your personal placements (session + future we can load server-side)
-
+  
+  const MIN_ZOOM = 1;
+  const MAX_ZOOM = 4;
+  const clamp = (v: number, min: number, max: number) => Math.min(Math.max(v, min), max);
   // Zoom
   const [zoom, setZoom] = useState(1);
-  const zoomIn = () => setZoom((z) => Math.min(z + 0.25, 3));
-  const zoomOut = () => setZoom((z) => Math.max(z - 0.25, 1));
+
+  const zoomIn  = () => setZoom((z) => clamp(z + 0.5, MIN_ZOOM, MAX_ZOOM));
+  const zoomOut = () => setZoom((z) => clamp(z - 0.5, MIN_ZOOM, MAX_ZOOM));
+
+const handleZoomDelta = (delta: number) => {
+  setZoom(z => clamp(z * delta, MIN_ZOOM, MAX_ZOOM));
+};
+
 
   // Boot
   useEffect(() => {
@@ -469,6 +480,7 @@ const handleSaveUsername = async (name: string) => {
                 canPlace={canPlace}
                 onPlaced={handlePlaced}
                 onStats={({ nonWhite }) => setNonWhite(nonWhite)}
+                onZoomDelta={handleZoomDelta}
               />
             </div>
           </div>

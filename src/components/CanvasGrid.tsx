@@ -10,11 +10,15 @@ const WHITE = "#ffffff";
 type Props = {
   selectedColor: string;
   username: string;
-  zoom: number;                 // 1 = fit to window; >1 = zoomed in
-  canPlace?: boolean;           // block clicks when false
+  zoom: number;
+  canPlace?: boolean;
   onPlaced?: (row: { x: number; y: number; color: string; username: string }) => void;
   onStats?: (stats: { nonWhite: number }) => void;
+  onZoomDelta?: (delta: number) => void;  // 👈 NEW
 };
+
+
+
 
 type PixelRow = {
   x: number;
@@ -30,8 +34,10 @@ const CanvasGrid = ({
   zoom,
   canPlace = true,
   onPlaced,
-  onStats
+  onStats,
+  onZoomDelta,            // 👈 add this
 }: Props) => {
+
   // Local grid (DB-backed: initial load + realtime)
   const [grid, setGrid] = useState<string[][]>(
     Array.from({ length: GRID_HEIGHT }, () => Array(GRID_WIDTH).fill(WHITE))
@@ -54,6 +60,57 @@ const CanvasGrid = ({
   // Two layers:
   const outerRef = useRef<HTMLDivElement>(null);
   const viewportRef = useRef<HTMLDivElement>(null);
+
+// --- Pinch-to-zoom (mobile) ---
+const initialPinch = useRef<{ d: number } | null>(null);
+
+const pinchDistance = (e: TouchEvent) => {
+  const t0 = e.touches[0], t1 = e.touches[1];
+  const dx = t1.clientX - t0.clientX;
+  const dy = t1.clientY - t0.clientY;
+  return Math.hypot(dx, dy);
+};
+
+useEffect(() => {
+  const el = viewportRef.current;
+  if (!el) return;
+
+  const onTouchStart = (e: TouchEvent) => {
+    if (e.touches.length === 2) {
+      initialPinch.current = { d: pinchDistance(e) };
+    }
+  };
+
+  const onTouchMove = (e: TouchEvent) => {
+    if (e.touches.length === 2 && initialPinch.current) {
+      e.preventDefault();
+      const dNow = pinchDistance(e);
+      const d0 = initialPinch.current.d || 1;
+      if (d0 > 0 && Math.abs(dNow - d0) > 2) {
+        const delta = dNow / d0;
+        const eased = Math.pow(delta, 0.85);
+        onZoomDelta?.(eased);  // 👈 no error now, prop is defined
+        initialPinch.current.d = dNow;
+      }
+    }
+  };
+
+  const onTouchEnd = () => {
+    initialPinch.current = null;
+  };
+
+  el.addEventListener("touchstart", onTouchStart as any, { passive: true });
+  el.addEventListener("touchmove", onTouchMove as any, { passive: false });
+  el.addEventListener("touchend", onTouchEnd as any);
+  el.addEventListener("touchcancel", onTouchEnd as any);
+
+  return () => {
+    el.removeEventListener("touchstart", onTouchStart as any);
+    el.removeEventListener("touchmove", onTouchMove as any);
+    el.removeEventListener("touchend", onTouchEnd as any);
+    el.removeEventListener("touchcancel", onTouchEnd as any);
+  };
+}, [onZoomDelta]);
 
   // Fit scale so whole canvas fills viewport at zoom=1
   const [fitScale, setFitScale] = useState(1);
@@ -110,7 +167,7 @@ const CanvasGrid = ({
       );
     }
   };
-
+  
   // Initial load (latest wins at each x,y)
   useEffect(() => {
     let cancelled = false;
