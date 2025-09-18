@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import CanvasGrid, { GRID_WIDTH, GRID_HEIGHT } from "./components/CanvasGrid";
 import ColorPalette from "./components/ColorPalette";
 import Header from "./components/Header";
@@ -10,7 +10,7 @@ const COOLDOWN_MS = 5 * 60 * 1000; // 5 minutes
 const LS_USERNAME = "pp_username";
 const LS_LAST_PLACED_AT = "pp_lastPlacedAt";
 const LS_DEVICE_ID = "pp_deviceId";
-const clamp = (n: number, min: number, max: number) => Math.max(min, Math.min(max, n));
+
 
 // --- Username validation helpers ---
 const bannedWords = [
@@ -219,7 +219,6 @@ const resetDeviceId = () => {
     return `${m}:${s.toString().padStart(2, "0")}`;
   };
 
-const USE_SIMPLE_USERNAME_CLAIM = import.meta.env.DEV; // dev: no device_id, prod: full Profiles
 
 const handleSaveUsername = async (name: string) => {
   const clean = name.trim();

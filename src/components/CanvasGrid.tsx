@@ -43,7 +43,7 @@ const CanvasGrid = ({
   );
 
   // Track non-white cells for the "Revealed" counter
-  const [nonWhite, setNonWhite] = useState(0);
+  const [, setNonWhite] = useState(0);
   const recountNonWhite = (g: string[][]) =>
     g.reduce(
       (sum, row) =>
@@ -225,7 +225,7 @@ const CanvasGrid = ({
 // const { error } = await supabase.from("PixelDatabase").insert([{ x, y, color: nextColor, username: placedBy }]);
 
 // AFTER (server-checked):
-const { data, error } = await supabase.rpc("place_pixel", {
+const { error } = await supabase.rpc("place_pixel", {
   p_x: x,
   p_y: y,
   p_color: nextColor,
