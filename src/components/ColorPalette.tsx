@@ -12,7 +12,7 @@ const LS_RECENT_COLORS = "pp_recent_colors";
 // Order: important first → saturated hues sweep → neutrals/earths → extras
 const BASE_COLORS = [
   // important up front
-  "#000000", "#FFFFFF", "#FF0000", "#FF7F00", "#FFD700", "#22C55E", "#00CED1", "#1E90FF", "#7C3AED", "#FF2D55", "#8B4513", "#6B7280",
+  "#000000", "#040202ff", "#FF0000", "#FF7F00", "#FFD700", "#22C55E", "#00CED1", "#1E90FF", "#7C3AED", "#FF2D55", "#8B4513", "#6B7280",
 
   // reds
   "#BE0039", "#DC2626", "#EF4444", "#F87171",
@@ -40,6 +40,8 @@ const BASE_COLORS = [
 
 const TILE = 48;      // bigger tap targets
 const PANEL_W = 260;  // custom picker popover width
+// Ensure base colors are unique (some were repeated)
+const BASE_COLORS_UNIQ = Array.from(new Set(BASE_COLORS.map(c => c.toUpperCase())));
 
 function isHexColor(v: string) {
   return /^#([0-9a-fA-F]{6})$/.test(v);
@@ -75,11 +77,14 @@ export default function ColorPalette({ selectedColor, setSelectedColor }: Props)
       return withNew.slice(0, 8); // keep 8 recent slots
     });
   };
+const swatches = useMemo(() => {
+  const rec = recents
+    .map(c => c.toUpperCase())
+    .filter(c => !BASE_COLORS_UNIQ.includes(c));
+  const merged = [...rec, ...BASE_COLORS_UNIQ];
+  return Array.from(new Set(merged)); // final de-dup
+}, [recents]);
 
-  const swatches = useMemo(() => {
-    const rec = recents.filter((c) => !BASE_COLORS.includes(c.toUpperCase()));
-    return [...rec, ...BASE_COLORS];
-  }, [recents]);
 
   // Picker positioning (portal)
   const positionPicker = () => {
@@ -158,12 +163,12 @@ export default function ColorPalette({ selectedColor, setSelectedColor }: Props)
           }}
         >
           {swatches.map((color) => {
-            const isSelected = selectedColor.toUpperCase() === color.toUpperCase();
+            const isSelected = selectedColor.toUpperCase() === color;
             return (
               <button
                 type="button"
-                key={color}
-                onClick={() => setSelectedColor(color.toUpperCase())}
+                key={color}                                   // key is now unique
+                onClick={() => setSelectedColor(color)}
                 className={`
                   rounded-md border-2 transition
                   ${isSelected ? "border-black ring-2 ring-blue-500 scale-105" : "border-gray-300 hover:border-gray-400"}
@@ -175,6 +180,7 @@ export default function ColorPalette({ selectedColor, setSelectedColor }: Props)
               />
             );
           })}
+
         </div>
       </div>
 

@@ -185,6 +185,8 @@ const handleZoomDelta = (delta: number) => {
 
   // Boot
   useEffect(() => {
+    console.log("Using Supabase URL:", import.meta.env.VITE_SUPABASE_URL);
+
     ensureDeviceId();
 
     const saved = localStorage.getItem(LS_USERNAME);
@@ -474,14 +476,14 @@ const handleSaveUsername = async (name: string) => {
 
             <div className={canPlace ? "" : "pointer-events-none"}>
               <CanvasGrid
-                selectedColor={selectedColor}
-                username={username ?? "Anonymous"}
-                zoom={zoom}
-                canPlace={canPlace}
-                onPlaced={handlePlaced}
-                onStats={({ nonWhite }) => setNonWhite(nonWhite)}
-                onZoomDelta={handleZoomDelta}
-              />
+              selectedColor={selectedColor}
+              username={username ?? "Anonymous"}
+              zoom={zoom}
+              canPlace={canPlace}
+              onPlaced={handlePlaced}
+              onStats={({ nonWhite }) => setNonWhite(nonWhite)}  // 👈 important
+            />
+
             </div>
           </div>
 
