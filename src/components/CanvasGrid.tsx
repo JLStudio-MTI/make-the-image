@@ -6,6 +6,20 @@ export const GRID_WIDTH = 64;
 export const GRID_HEIGHT = 40;
 const PIXEL_SIZE = 10;
 const WHITE = "#ffffff";
+const isHex = (v: string) => /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.test(v);
+
+const normalizeHex = (v: string): string | null => {
+  if (!v) return null;
+  let s = v.trim();
+  if (!s.startsWith("#")) s = "#" + s;
+  if (!isHex(s)) return null;
+  // Expand 3-digit (#RGB -> #RRGGBB)
+  if (s.length === 4) {
+    const r = s[1], g = s[2], b = s[3];
+    s = `#${r}${r}${g}${g}${b}${b}`;
+  }
+  return s.toUpperCase();
+};
 
 type Props = {
   selectedColor: string;
@@ -14,7 +28,7 @@ type Props = {
   canPlace?: boolean;
   onPlaced?: (row: { x: number; y: number; color: string; username: string }) => void;
   onStats?: (stats: { nonWhite: number }) => void;
-  onZoomDelta?: (delta: number) => void; // multiplicative (e.g., 1.05 to zoom in slightly)
+  onZoomDelta?: (delta: number) => void; // optional pinch/ctrl+wheel hook
 };
 
 type PixelRow = {
@@ -22,10 +36,12 @@ type PixelRow = {
   y: number;
   color: string | null;
   username: string | null;
-  timestamp?: string;
+  timestamp?: string | null;
 };
 
-const CanvasGrid = ({
+const isHex6 = (v: string) => /^#[0-9a-fA-F]{6}$/.test(v);
+
+export default function CanvasGrid({
   selectedColor,
   username,
   zoom,
@@ -33,8 +49,8 @@ const CanvasGrid = ({
   onPlaced,
   onStats,
   onZoomDelta,
-}: Props) => {
-  // ===== State =====
+}: Props) {
+  // ===== grid state =====
   const [grid, setGrid] = useState<string[][]>(
     Array.from({ length: GRID_HEIGHT }, () => Array(GRID_WIDTH).fill(WHITE))
   );
@@ -42,23 +58,16 @@ const CanvasGrid = ({
     Array.from({ length: GRID_HEIGHT }, () => Array(GRID_WIDTH).fill(null))
   );
 
-  // keep a stable ref to onStats to avoid stale closures
-  const onStatsRef = useRef(onStats);
-  useEffect(() => {
-    onStatsRef.current = onStats;
-  }, [onStats]);
-
-  // recompute revealed count from the grid on every local change
+  // recompute revealed count from grid (authoritative, no drift)
   useEffect(() => {
     const nonWhite = grid.reduce(
-      (acc, row) => acc + row.reduce((s, c) => s + (c.toLowerCase() !== WHITE ? 1 : 0), 0),
+      (acc, row) => acc + row.reduce((s, c) => s + (c !== WHITE ? 1 : 0), 0),
       0
     );
-    onStatsRef.current?.({ nonWhite });
-  }, [grid]);
+    onStats?.({ nonWhite });
+  }, [grid, onStats]);
 
-  // layout / zoom
-  const outerRef = useRef<HTMLDivElement>(null);
+  // ===== layout / zoom =====
   const viewportRef = useRef<HTMLDivElement>(null);
   const [fitScale, setFitScale] = useState(1);
   const baseWidth = GRID_WIDTH * PIXEL_SIZE;
@@ -67,7 +76,6 @@ const CanvasGrid = ({
   const scaledWidth = baseWidth * totalScale;
   const scaledHeight = baseHeight * totalScale;
 
-  // fit-to-box at zoom=1
   useEffect(() => {
     const vp = viewportRef.current;
     if (!vp) return;
@@ -93,166 +101,180 @@ const CanvasGrid = ({
     };
   }, [zoom, baseWidth, baseHeight]);
 
-  // ===== Helpers =====
-  const setCell = (x: number, y: number, color: string, placedBy?: string | null) => {
+  // ===== helpers =====
+  const applyCell = (x: number, y: number, color: string, placedBy?: string | null) => {
     if (x < 0 || y < 0 || x >= GRID_WIDTH || y >= GRID_HEIGHT) return;
-
-    setGrid((prev) =>
+    setGrid(prev =>
       prev.map((row, ry) => row.map((c, rx) => (rx === x && ry === y ? color : c)))
     );
-
     if (placedBy !== undefined) {
-      setGridUsernames((prev) =>
+      setGridUsernames(prev =>
         prev.map((row, ry) => row.map((u, rx) => (rx === x && ry === y ? placedBy : u)))
       );
     }
   };
 
-  const refreshCount = async () => {
-    const { data: countRes, error: countErr } = await supabase.rpc("revealed_count");
-    if (!countErr && typeof countRes === "number") {
-      onStatsRef.current?.({ nonWhite: countRes });
-    }
-  };
+  // ===== initial load + realtime (buffer during load) =====
+  const isLoadingRef = useRef(true);
+  const bufferRef = useRef<PixelRow[]>([]);
 
-  // ===== Initial load from view =====
   useEffect(() => {
     let cancelled = false;
 
-    const load = async () => {
-      const { data, error } = await supabase
-        .from("current_canvas")
-        .select("x,y,color,username,timestamp")
-        .order("y", { ascending: true })
-        .order("x", { ascending: true });
-
-      if (error) {
-        console.error("❌ Load current canvas failed:", error.message);
-        return;
-      }
-      if (cancelled || !data) return;
-
+    const fillFromRows = (rows: PixelRow[]) => {
       const freshColors: string[][] = Array.from({ length: GRID_HEIGHT }, () =>
-        Array(GRID_WIDTH).fill("#ffffff")
+        Array(GRID_WIDTH).fill(WHITE)
       );
       const freshUsers: (string | null)[][] = Array.from({ length: GRID_HEIGHT }, () =>
         Array(GRID_WIDTH).fill(null)
       );
-
-      for (const r of data as PixelRow[]) {
-        if (r.x >= 0 && r.y >= 0 && r.x < GRID_WIDTH && r.y < GRID_HEIGHT) {
-          freshColors[r.y][r.x] = (r.color ?? "#ffffff").toLowerCase();
-          freshUsers[r.y][r.x] = r.username ?? null;
+      for (const r of rows) {
+        const x = r.x | 0, y = r.y | 0;
+        if (x >= 0 && y >= 0 && x < GRID_WIDTH && y < GRID_HEIGHT) {
+          const color = (r.color ?? WHITE).toLowerCase();
+          freshColors[y][x] = isHex6(color) ? color : WHITE;
+          freshUsers[y][x] = r.username ?? null;
         }
       }
       setGrid(freshColors);
       setGridUsernames(freshUsers);
-
-      await refreshCount(); // authoritative count
     };
 
-    load();
+    const load = async () => {
+      // 1) Subscribe first; buffer events during load
+      const channel = supabase
+        .channel("pixeldb-inserts")
+        .on(
+          "postgres_changes",
+          { event: "INSERT", schema: "public", table: "PixelDatabase" },
+          (payload) => {
+            const r = payload.new as PixelRow;
+            if (isLoadingRef.current) {
+              bufferRef.current.push(r);
+            } else {
+              const x = r.x | 0, y = r.y | 0;
+              if (x < 0 || y < 0 || x >= GRID_WIDTH || y >= GRID_HEIGHT) return;
+              const color = (r.color ?? WHITE).toLowerCase();
+              applyCell(x, y, isHex6(color) ? color : WHITE, r.username ?? null);
+            }
+          }
+        )
+        .subscribe();
+
+      // 2) Try authoritative view; if missing, fall back to table replay
+      let rows: PixelRow[] = [];
+      {
+        const { data, error } = await supabase
+          .from("current_canvas") // view with latest per cell
+          .select("x,y,color,username,timestamp")
+          .order("y", { ascending: true })
+          .order("x", { ascending: true });
+
+        if (!error && data) {
+          rows = data as PixelRow[];
+        } else {
+          // Fallback: replay from table (oldest→newest; latest wins)
+          const { data: raw, error: e2 } = await supabase
+            .from("PixelDatabase")
+            .select("x,y,color,username,timestamp")
+            .order("timestamp", { ascending: true });
+          if (e2) {
+            console.error("❌ Load pixels failed:", e2.message);
+          }
+          rows = (raw ?? []) as PixelRow[];
+        }
+      }
+
+      if (!cancelled) fillFromRows(rows);
+
+      // 3) Mark loaded and drain buffered events
+      isLoadingRef.current = false;
+      if (bufferRef.current.length) {
+        const drained = bufferRef.current.splice(0, bufferRef.current.length);
+        for (const r of drained) {
+          const x = r.x | 0, y = r.y | 0;
+          if (x < 0 || y < 0 || x >= GRID_WIDTH || y >= GRID_HEIGHT) continue;
+          const color = (r.color ?? WHITE).toLowerCase();
+          applyCell(x, y, isHex6(color) ? color : WHITE, r.username ?? null);
+        }
+      }
+
+      return () => {
+        supabase.removeChannel(channel);
+      };
+    };
+
+    const cleanup = load();
     return () => {
       cancelled = true;
+      // ensure we unsubscribe even if load early returns
+      cleanup?.then?.(() => {});
     };
   }, []);
 
-  // ===== Realtime inserts → paint cell + refresh server count =====
-  useEffect(() => {
-    const channel = supabase
-      .channel("pixeldb-inserts")
-      .on(
-        "postgres_changes",
-        { event: "INSERT", schema: "public", table: "PixelDatabase" },
-        (payload) => {
-          const row = payload.new as PixelRow;
-          const x = Number(row.x);
-          const y = Number(row.y);
-          if (Number.isNaN(x) || Number.isNaN(y)) return;
-          if (x < 0 || y < 0 || x >= GRID_WIDTH || y >= GRID_HEIGHT) return;
+  // ===== place pixel =====
+const handleClick = async (x: number, y: number) => {
+  if (!canPlace) return;
 
-          setCell(x, y, (row.color ?? WHITE).toLowerCase(), row.username ?? null);
-          // ask DB for the definitive revealed count
-          refreshCount();
-        }
-      )
-      .subscribe();
+  const normalized = normalizeHex(selectedColor);
+  if (!normalized) {
+    console.warn("Blocked invalid color:", selectedColor);
+    return;
+  }
 
-    return () => {
-      supabase.removeChannel(channel);
-    };
-  }, []);
+  const prevColor = grid[y][x];
+  const prevUser = gridUsernames[y][x];
+  const placedBy = username || "Anonymous";
 
-  // ===== Input: click to place =====
-  const handleClick = async (x: number, y: number) => {
-    if (!canPlace) return;
+  // optimistic
+  applyCell(x, y, normalized.toLowerCase(), placedBy);
 
-    const prevColor = grid[y][x];
-    const prevUser = gridUsernames[y][x];
-    const nextColor = selectedColor.toLowerCase();
-    const placedBy = username || "Anonymous";
+  const { error } = await supabase.rpc("place_pixel", {
+    p_x: x,
+    p_y: y,
+    p_color: normalized.toLowerCase(),
+    p_username: placedBy,
+    p_cooldown_seconds: import.meta.env.DEV ? 30 : 300,
+  });
 
-    // optimistic
-    setCell(x, y, nextColor, placedBy);
+  if (error) {
+    console.warn("RPC place_pixel error:", error);
+    applyCell(x, y, prevColor, prevUser);
+    return;
+  }
 
-    // server-side checked insert (cooldown)
-    const { error } = await supabase.rpc("place_pixel", {
-      p_x: x,
-      p_y: y,
-      p_color: nextColor,
-      p_username: placedBy,
-      p_cooldown_seconds: import.meta.env.DEV ? 30 : 300,
-    });
+  onPlaced?.({ x, y, color: normalized.toLowerCase(), username: placedBy });
+};
 
-    if (error) {
-      // rollback on error
-      console.warn("RPC place_pixel error:", error);
-      setCell(x, y, prevColor, prevUser);
-      return;
-    }
-    onPlaced?.({ x, y, color: nextColor, username: placedBy });
-    // Count will be refreshed by the realtime listener when the insert lands
-  };
 
-  // ===== Pinch to zoom (mobile) + wheel zoom (desktop) =====
-  const initialPinch = useRef<{ d: number } | null>(null);
-  const pinchDistance = (e: TouchEvent) => {
-    const t0 = e.touches[0],
-      t1 = e.touches[1];
-    const dx = t1.clientX - t0.clientX;
-    const dy = t1.clientY - t0.clientY;
-    return Math.hypot(dx, dy);
-  };
-
+  // ===== pinch + ctrl-wheel zoom (optional, safe to leave) =====
   useEffect(() => {
     const el = viewportRef.current;
     if (!el) return;
 
+    const initialPinch = { d: 0 };
+    const dist = (e: TouchEvent) => {
+      const [a, b] = [e.touches[0], e.touches[1]];
+      return Math.hypot(b.clientX - a.clientX, b.clientY - a.clientY);
+    };
+
     const onTouchStart = (e: TouchEvent) => {
-      if (e.touches.length === 2) {
-        initialPinch.current = { d: pinchDistance(e) };
-      }
+      if (e.touches.length === 2) initialPinch.d = dist(e);
     };
     const onTouchMove = (e: TouchEvent) => {
-      if (e.touches.length === 2 && initialPinch.current) {
+      if (e.touches.length === 2 && initialPinch.d > 0) {
         e.preventDefault();
-        const dNow = pinchDistance(e);
-        const d0 = initialPinch.current.d || 1;
-        if (d0 > 0 && Math.abs(dNow - d0) > 2) {
-          const delta = Math.pow(dNow / d0, 0.85);
-          onZoomDelta?.(delta);
-          initialPinch.current.d = dNow;
-        }
+        const dNow = dist(e);
+        const delta = Math.pow(dNow / initialPinch.d, 0.85);
+        onZoomDelta?.(delta);
+        initialPinch.d = dNow;
       }
     };
-    const onTouchEnd = () => {
-      initialPinch.current = null;
-    };
+    const onTouchEnd = () => (initialPinch.d = 0);
     const onWheel = (e: WheelEvent) => {
-      if (!e.ctrlKey) return; // only with ctrl/cmd like browsers' "pinch"
+      if (!e.ctrlKey) return;
       e.preventDefault();
-      const delta = e.deltaY < 0 ? 1.05 : 0.95;
-      onZoomDelta?.(delta);
+      onZoomDelta?.(e.deltaY < 0 ? 1.05 : 0.95);
     };
 
     el.addEventListener("touchstart", onTouchStart as any, { passive: true });
@@ -270,7 +292,7 @@ const CanvasGrid = ({
     };
   }, [onZoomDelta]);
 
-  // ===== Render =====
+  // ===== render =====
   const cells = useMemo(
     () =>
       grid.flatMap((row, y) =>
@@ -279,11 +301,7 @@ const CanvasGrid = ({
             key={`${x}-${y}`}
             onClick={() => handleClick(x, y)}
             className="cursor-pointer"
-            style={{
-              width: PIXEL_SIZE,
-              height: PIXEL_SIZE,
-              backgroundColor: color,
-            }}
+            style={{ width: PIXEL_SIZE, height: PIXEL_SIZE, backgroundColor: color }}
             title={`(${x},${y}) — placed by ${gridUsernames[y][x] ?? "Unknown"}`}
           />
         ))
@@ -293,13 +311,8 @@ const CanvasGrid = ({
 
   return (
     <div
-      ref={outerRef}
       className="rounded-lg border border-gray-300"
-      style={{
-        width: "100%",
-        maxWidth: 720,
-        aspectRatio: `${GRID_WIDTH} / ${GRID_HEIGHT}`,
-      }}
+      style={{ width: "100%", maxWidth: 720, aspectRatio: `${GRID_WIDTH} / ${GRID_HEIGHT}` }}
     >
       <div
         ref={viewportRef}
@@ -324,6 +337,4 @@ const CanvasGrid = ({
       </div>
     </div>
   );
-};
-
-export default CanvasGrid;
+}
