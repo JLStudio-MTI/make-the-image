@@ -482,6 +482,7 @@ const handleSaveUsername = async (name: string) => {
               canPlace={canPlace}
               onPlaced={handlePlaced}
               onStats={({ nonWhite }) => setNonWhite(nonWhite)}  // 👈 important
+              onZoomDelta={handleZoomDelta}   
             />
 
             </div>
