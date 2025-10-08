@@ -1,49 +1,44 @@
 // src/components/CanvasGrid.tsx
 import { useEffect, useMemo, useRef, useState } from "react";
-import { supabase } from "../lib/supabaseClient";
+import { db } from "../lib/firebaseClient";
+import { ref, onValue, update } from "firebase/database";
 
 export const GRID_WIDTH = 64;
 export const GRID_HEIGHT = 40;
 const PIXEL_SIZE = 10;
 const WHITE = "#ffffff";
-const isHex = (v: string) => /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.test(v);
-
-const normalizeHex = (v: string): string | null => {
-  if (!v) return null;
-  let s = v.trim();
-  if (!s.startsWith("#")) s = "#" + s;
-  if (!isHex(s)) return null;
-  // Expand 3-digit (#RGB -> #RRGGBB)
-  if (s.length === 4) {
-    const r = s[1], g = s[2], b = s[3];
-    s = `#${r}${r}${g}${g}${b}${b}`;
-  }
-  return s.toUpperCase();
-};
 
 type Props = {
-  selectedColor: string;
-  username: string;
+  selectedColor: string;           // #rrggbb (lowercase ok)
+  username: string;                // validated in App
+  uid: string | null;              // Firebase uid (null until anon sign-in completes)
   zoom: number;
   canPlace?: boolean;
   onPlaced?: (row: { x: number; y: number; color: string; username: string }) => void;
   onStats?: (stats: { nonWhite: number }) => void;
-  onZoomDelta?: (delta: number) => void; // optional pinch/ctrl+wheel hook
+  onZoomDelta?: (delta: number) => void;
 };
 
-type PixelRow = {
-  x: number;
-  y: number;
-  color: string | null;
-  username: string | null;
-  timestamp?: string | null;
-};
+type PixelCell = { color: string; username?: string; ts?: number; uid?: string } | null;
 
-const isHex6 = (v: string) => /^#[0-9a-fA-F]{6}$/.test(v);
+/** strict #rrggbb lower */
+const isHex6Lower = (v: string) => /^#[0-9a-f]{6}$/.test(v);
+const toHex6Lower = (v: string): string | null => {
+  if (!v) return null;
+  let s = v.trim();
+  if (!s.startsWith("#")) s = "#" + s;
+  if (/^#[0-9a-f]{3}$/i.test(s)) {
+    const r = s[1], g = s[2], b = s[3];
+    s = `#${r}${r}${g}${g}${b}${b}`;
+  }
+  if (!/^#[0-9a-f]{6}$/i.test(s)) return null;
+  return s.toLowerCase();
+};
 
 export default function CanvasGrid({
   selectedColor,
   username,
+  uid,
   zoom,
   canPlace = true,
   onPlaced,
@@ -58,7 +53,7 @@ export default function CanvasGrid({
     Array.from({ length: GRID_HEIGHT }, () => Array(GRID_WIDTH).fill(null))
   );
 
-  // recompute revealed count from grid (authoritative, no drift)
+  // recompute revealed count from grid
   useEffect(() => {
     const nonWhite = grid.reduce(
       (acc, row) => acc + row.reduce((s, c) => s + (c !== WHITE ? 1 : 0), 0),
@@ -101,176 +96,109 @@ export default function CanvasGrid({
     };
   }, [zoom, baseWidth, baseHeight]);
 
-  // ===== helpers =====
-  const applyCell = (x: number, y: number, color: string, placedBy?: string | null) => {
-    if (x < 0 || y < 0 || x >= GRID_WIDTH || y >= GRID_HEIGHT) return;
-    setGrid(prev =>
-      prev.map((row, ry) => row.map((c, rx) => (rx === x && ry === y ? color : c)))
+  // ===== live load (Firebase) =====
+  useEffect(() => {
+    // Subscribe to /pixels and build a full 64x40 grid from it
+    const off = onValue(ref(db, "pixels"), (snap) => {
+      // fresh buffers
+      const colors: string[][] = Array.from({ length: GRID_HEIGHT }, () =>
+        Array(GRID_WIDTH).fill(WHITE)
+      );
+      const users: (string | null)[][] = Array.from({ length: GRID_HEIGHT }, () =>
+        Array(GRID_WIDTH).fill(null)
+      );
+
+      const all = snap.val() as Record<string, Record<string, PixelCell>> | null;
+      if (all) {
+        // all[y][x] = { color, username, ts }
+        for (let y = 0; y < GRID_HEIGHT; y++) {
+          const row = all[y] as Record<string, PixelCell> | undefined;
+          if (!row) continue;
+          for (let x = 0; x < GRID_WIDTH; x++) {
+            const cell = row[x] as PixelCell;
+            const c = cell?.color ?? WHITE;
+            const n = typeof cell?.username === "string" ? cell!.username! : null;
+            colors[y][x] = isHex6Lower(c) ? c : WHITE;
+            users[y][x] = n;
+          }
+        }
+      }
+
+      setGrid(colors);
+      setGridUsernames(users);
+    });
+
+    return () => off();
+  }, []);
+
+  // ===== place pixel =====
+  const handleClick = async (x: number, y: number) => {
+    if (!canPlace) return;
+    if (!uid || !username) {
+      console.warn("Blocked: missing uid/username");
+      return;
+    }
+
+    const normalized = toHex6Lower(selectedColor);
+    if (!normalized) {
+      console.warn("Blocked invalid color:", selectedColor);
+      return;
+    }
+
+    // optimistic update
+    setGrid((prev) =>
+      prev.map((row, ry) => row.map((c, rx) => (rx === x && ry === y ? normalized : c)))
     );
-    if (placedBy !== undefined) {
-      setGridUsernames(prev =>
-        prev.map((row, ry) => row.map((u, rx) => (rx === x && ry === y ? placedBy : u)))
+    setGridUsernames((prev) =>
+      prev.map((row, ry) => row.map((u, rx) => (rx === x && ry === y ? username : u)))
+    );
+
+    try {
+      await update(ref(db), {
+        [`pixels/${y}/${x}`]: {
+          color: normalized,
+          username,
+          uid,
+          ts: Date.now(),
+        },
+      });
+      onPlaced?.({ x, y, color: normalized, username });
+    } catch (e) {
+      console.warn("Firebase update failed:", e);
+      // best-effort rollback (reload will sync anyway)
+      setGrid((prev) =>
+        prev.map((row, ry) => row.map((c, rx) => (rx === x && ry === y ? WHITE : c)))
+      );
+      setGridUsernames((prev) =>
+        prev.map((row, ry) => row.map((u, rx) => (rx === x && ry === y ? null : u)))
       );
     }
   };
 
-  // ===== initial load + realtime (buffer during load) =====
-  const isLoadingRef = useRef(true);
-  const bufferRef = useRef<PixelRow[]>([]);
-
-  useEffect(() => {
-    let cancelled = false;
-
-    const fillFromRows = (rows: PixelRow[]) => {
-      const freshColors: string[][] = Array.from({ length: GRID_HEIGHT }, () =>
-        Array(GRID_WIDTH).fill(WHITE)
-      );
-      const freshUsers: (string | null)[][] = Array.from({ length: GRID_HEIGHT }, () =>
-        Array(GRID_WIDTH).fill(null)
-      );
-      for (const r of rows) {
-        const x = r.x | 0, y = r.y | 0;
-        if (x >= 0 && y >= 0 && x < GRID_WIDTH && y < GRID_HEIGHT) {
-          const color = (r.color ?? WHITE).toLowerCase();
-          freshColors[y][x] = isHex6(color) ? color : WHITE;
-          freshUsers[y][x] = r.username ?? null;
-        }
-      }
-      setGrid(freshColors);
-      setGridUsernames(freshUsers);
-    };
-
-    const load = async () => {
-      // 1) Subscribe first; buffer events during load
-      const channel = supabase
-        .channel("pixeldb-inserts")
-        .on(
-          "postgres_changes",
-          { event: "INSERT", schema: "public", table: "PixelDatabase" },
-          (payload) => {
-            const r = payload.new as PixelRow;
-            if (isLoadingRef.current) {
-              bufferRef.current.push(r);
-            } else {
-              const x = r.x | 0, y = r.y | 0;
-              if (x < 0 || y < 0 || x >= GRID_WIDTH || y >= GRID_HEIGHT) return;
-              const color = (r.color ?? WHITE).toLowerCase();
-              applyCell(x, y, isHex6(color) ? color : WHITE, r.username ?? null);
-            }
-          }
-        )
-        .subscribe();
-
-      // 2) Try authoritative view; if missing, fall back to table replay
-      let rows: PixelRow[] = [];
-      {
-        const { data, error } = await supabase
-          .from("current_canvas") // view with latest per cell
-          .select("x,y,color,username,timestamp")
-          .order("y", { ascending: true })
-          .order("x", { ascending: true });
-
-        if (!error && data) {
-          rows = data as PixelRow[];
-        } else {
-          // Fallback: replay from table (oldest→newest; latest wins)
-          const { data: raw, error: e2 } = await supabase
-            .from("PixelDatabase")
-            .select("x,y,color,username,timestamp")
-            .order("timestamp", { ascending: true });
-          if (e2) {
-            console.error("❌ Load pixels failed:", e2.message);
-          }
-          rows = (raw ?? []) as PixelRow[];
-        }
-      }
-
-      if (!cancelled) fillFromRows(rows);
-
-      // 3) Mark loaded and drain buffered events
-      isLoadingRef.current = false;
-      if (bufferRef.current.length) {
-        const drained = bufferRef.current.splice(0, bufferRef.current.length);
-        for (const r of drained) {
-          const x = r.x | 0, y = r.y | 0;
-          if (x < 0 || y < 0 || x >= GRID_WIDTH || y >= GRID_HEIGHT) continue;
-          const color = (r.color ?? WHITE).toLowerCase();
-          applyCell(x, y, isHex6(color) ? color : WHITE, r.username ?? null);
-        }
-      }
-
-      return () => {
-        supabase.removeChannel(channel);
-      };
-    };
-
-    const cleanup = load();
-    return () => {
-      cancelled = true;
-      // ensure we unsubscribe even if load early returns
-      cleanup?.then?.(() => {});
-    };
-  }, []);
-
-  // ===== place pixel =====
-const handleClick = async (x: number, y: number) => {
-  if (!canPlace) return;
-
-  const normalized = normalizeHex(selectedColor);
-  if (!normalized) {
-    console.warn("Blocked invalid color:", selectedColor);
-    return;
-  }
-
-  const prevColor = grid[y][x];
-  const prevUser = gridUsernames[y][x];
-  const placedBy = username || "Anonymous";
-
-  // optimistic
-  applyCell(x, y, normalized.toLowerCase(), placedBy);
-
-  const { error } = await supabase.rpc("place_pixel", {
-    p_x: x,
-    p_y: y,
-    p_color: normalized.toLowerCase(),
-    p_username: placedBy,
-    p_cooldown_seconds: import.meta.env.DEV ? 30 : 300,
-  });
-
-  if (error) {
-    console.warn("RPC place_pixel error:", error);
-    applyCell(x, y, prevColor, prevUser);
-    return;
-  }
-
-  onPlaced?.({ x, y, color: normalized.toLowerCase(), username: placedBy });
-};
-
-
-  // ===== pinch + ctrl-wheel zoom (optional, safe to leave) =====
+  // ===== pinch + ctrl-wheel zoom (optional) =====
   useEffect(() => {
     const el = viewportRef.current;
     if (!el) return;
 
-    const initialPinch = { d: 0 };
+    const pinch = { d: 0 };
     const dist = (e: TouchEvent) => {
       const [a, b] = [e.touches[0], e.touches[1]];
       return Math.hypot(b.clientX - a.clientX, b.clientY - a.clientY);
     };
 
     const onTouchStart = (e: TouchEvent) => {
-      if (e.touches.length === 2) initialPinch.d = dist(e);
+      if (e.touches.length === 2) pinch.d = dist(e);
     };
     const onTouchMove = (e: TouchEvent) => {
-      if (e.touches.length === 2 && initialPinch.d > 0) {
+      if (e.touches.length === 2 && pinch.d > 0) {
         e.preventDefault();
         const dNow = dist(e);
-        const delta = Math.pow(dNow / initialPinch.d, 0.85);
+        const delta = Math.pow(dNow / pinch.d, 0.85);
         onZoomDelta?.(delta);
-        initialPinch.d = dNow;
+        pinch.d = dNow;
       }
     };
-    const onTouchEnd = () => (initialPinch.d = 0);
+    const onTouchEnd = () => (pinch.d = 0);
     const onWheel = (e: WheelEvent) => {
       if (!e.ctrlKey) return;
       e.preventDefault();
@@ -292,7 +220,7 @@ const handleClick = async (x: number, y: number) => {
     };
   }, [onZoomDelta]);
 
-  // ===== render =====
+  // ===== render cells =====
   const cells = useMemo(
     () =>
       grid.flatMap((row, y) =>
