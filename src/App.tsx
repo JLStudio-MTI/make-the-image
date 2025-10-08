@@ -77,33 +77,6 @@ function UsernameModal({
 }
 
 /** Reconcile LS username with Firebase (claim if free or adopt server value). */
-async function ensureUsernameConsistency(uid: string, localName: string | null): Promise<string | null> {
-  const profileRef = child(ref(db), `profiles/${uid}`);
-  const profileSnap = await get(profileRef);
-  const serverName = profileSnap.child("username").val();
-  if (typeof serverName === "string" && serverName) {
-    // Trust server; update LS if needed
-    if (serverName !== localName) localStorage.setItem("pp_username", serverName);
-    return serverName;
-  }
-
-  // No server username yet. If we have a local name, attempt to claim it.
-  if (localName && usernameRegex.test(localName)) {
-    try {
-      await update(ref(db), {
-        [`/usernames/${localName}`]: uid,
-        [`/profiles/${uid}/username`]: localName,
-      });
-      return localName;
-    } catch {
-      // name taken; clear LS and force modal
-      localStorage.removeItem("pp_username");
-      return null;
-    }
-  }
-
-  return null;
-}
 
 function App() {
   const { push } = useToast();
